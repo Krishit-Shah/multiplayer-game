@@ -337,8 +337,26 @@ module.exports = (io) => {
         const room = await Room.findById(roomId);
         if (!room) return;
 
+        // Find the player and toggle their ready status
+        const playerIndex = room.players.findIndex(p => p.user.toString() === socket.userId.toString());
+        if (playerIndex === -1) {
+          socket.emit('error', { message: 'Player not found in room' });
+          return;
+        }
+
+        // Toggle the ready status
+        room.players[playerIndex].isReady = !room.players[playerIndex].isReady;
+        await room.save();
+
+        // Emit the player ready toggled event to all players in the room
+        io.to(roomId).emit('player-ready-toggled', {
+          userId: socket.userId,
+          isReady: room.players[playerIndex].isReady
+        });
+
+        // Check if all active players are ready
         const activePlayers = room.players.filter(p => !p.isSpectator);
-            if (activePlayers.length > 0 && activePlayers.every(p => p.isReady)) {
+        if (activePlayers.length >= 2 && activePlayers.every(p => p.isReady)) {
           // Start 30-second countdown instead of immediately starting game
           io.to(roomId).emit('countdown-update', { countdown: 30 });
           let countdown = 30;
@@ -352,9 +370,9 @@ module.exports = (io) => {
             }
           }, 1000);
           manualStartTimers.set(roomId, countdownInterval);
-            } else {
-              // If not all ready, cancel any existing countdown
-              io.to(roomId).emit('countdown-cancelled');
+        } else {
+          // If not all ready, cancel any existing countdown
+          io.to(roomId).emit('countdown-cancelled');
           if (manualStartTimers.has(roomId)) {
             clearInterval(manualStartTimers.get(roomId));
             manualStartTimers.delete(roomId);
