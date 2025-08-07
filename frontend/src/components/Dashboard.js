@@ -145,7 +145,6 @@ const Dashboard = () => {
                   onChange={(e) => setCreateForm({...createForm, gameType: e.target.value})}
                 >
                   <option value="tic-tac-toe">Tic Tac Toe (2 players)</option>
-                  <option value="quiz">Quiz (4 players)</option>
                 </select>
               </div>
 
@@ -214,7 +213,7 @@ const Dashboard = () => {
             {rooms.map(room => (
               <div key={room.id} className="room-card">
                 <h4>{room.name}</h4>
-                <p>Game: {room.gameType === 'tic-tac-toe' ? 'Tic Tac Toe' : 'Quiz'}</p>
+                <p>Game: Tic Tac Toe</p>
                 <p>Host: {room.host}</p>
                 <p>Players: {room.playerCount}/{room.maxPlayers}</p>
                 <p>Code: {room.code}</p>

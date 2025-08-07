@@ -15,12 +15,7 @@ const Game = () => {
   const [gameData, setGameData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [quizState, setQuizState] = useState({
-    currentQuestion: null,
-    selectedAnswer: null,
-    timeLeft: 0,
-    timer: null
-  });
+  const [isMoving, setIsMoving] = useState(false);
 
   const fetchRoom = useCallback(async () => {
     try {
@@ -43,7 +38,10 @@ const Game = () => {
       joinRoom(room.id);
       
       const handleRoomUpdated = ({ room: updatedRoom }) => {
-        console.log('Room updated in game:', updatedRoom);
+        // Only log significant room updates, not every single one
+        if (updatedRoom.gameState !== room?.gameState) {
+          console.log('Game state changed:', updatedRoom.gameState);
+        }
         setRoom(updatedRoom);
         setGameData(updatedRoom.gameData);
         
@@ -55,61 +53,31 @@ const Game = () => {
       };
 
       const handleGameStarted = ({ gameType, gameData: newGameData }) => {
-        console.log('Game started in game component:', gameType, newGameData);
+        console.log('Game started:', gameType);
         setGameData(newGameData);
       };
 
       const handleGameUpdated = ({ gameData: updatedGameData, gameState }) => {
-        console.log('Game updated:', updatedGameData, gameState);
+        // Only log when game state changes or game ends
+        if (gameState === 'finished' || gameState !== gameData?.gameState) {
+          console.log('Game state updated:', gameState);
+        }
         setGameData(updatedGameData);
+        setIsMoving(false); // Reset moving state when game is updated
         if (gameState === 'finished') {
           // Game ended, stay in room for chat
         }
       };
 
       const handleGameReset = ({ gameState, gameData: resetGameData }) => {
-        console.log('Game reset:', gameState, resetGameData);
+        console.log('Game reset to:', gameState);
         setGameData(resetGameData);
         // Redirect back to room when game is reset
         navigate(`/room/${roomId}`);
       };
 
-      const handleQuizQuestion = ({ question, questionIndex, timeLimit }) => {
-        console.log('Quiz question received:', question);
-        setQuizState({
-          currentQuestion: question,
-          questionIndex,
-          selectedAnswer: null,
-          timeLeft: timeLimit,
-          timer: setInterval(() => {
-            setQuizState(prev => ({
-              ...prev,
-              timeLeft: prev.timeLeft - 1
-            }));
-          }, 1000)
-        });
-      };
-
-      const handleQuizResults = ({ questionIndex, correctAnswer, answers, scores }) => {
-        console.log('Quiz results received:', { questionIndex, correctAnswer, answers, scores });
-        // Clear timer
-        if (quizState.timer) {
-          clearInterval(quizState.timer);
-        }
-        
-        // Show results briefly
-        setTimeout(() => {
-          setQuizState(prev => ({
-            ...prev,
-            currentQuestion: null,
-            selectedAnswer: null,
-            timer: null
-          }));
-        }, 3000);
-      };
-
       const handleGameEnded = ({ finalScores }) => {
-        console.log('Game ended:', finalScores);
+        console.log('Game ended with final scores');
         // Game completely finished
         setGameData(prev => ({ ...prev, gameState: 'finished' }));
       };
@@ -118,8 +86,6 @@ const Game = () => {
       socket.on('game-started', handleGameStarted);
       socket.on('game-updated', handleGameUpdated);
       socket.on('game-reset', handleGameReset);
-      socket.on('quiz-question', handleQuizQuestion);
-      socket.on('quiz-results', handleQuizResults);
       socket.on('game-ended', handleGameEnded);
 
       return () => {
@@ -127,21 +93,17 @@ const Game = () => {
         socket.off('game-started', handleGameStarted);
         socket.off('game-updated', handleGameUpdated);
         socket.off('game-reset', handleGameReset);
-        socket.off('quiz-question', handleQuizQuestion);
-        socket.off('quiz-results', handleQuizResults);
         socket.off('game-ended', handleGameEnded);
       };
     }
-  }, [socket, room, roomId, navigate, joinRoom, quizState.timer]);
+  }, [socket, room, roomId, navigate, joinRoom]);
 
   useEffect(() => {
     // Cleanup timer on unmount
     return () => {
-      if (quizState.timer) {
-        clearInterval(quizState.timer);
-      }
+      // No timers to clear for Tic Tac Toe
     };
-  }, [quizState.timer]);
+  }, []);
 
   const handleLeaveGame = async () => {
     try {
@@ -154,33 +116,43 @@ const Game = () => {
   };
 
   const handleTicTacToeMove = (row, col) => {
-    if (gameData && gameData.currentTurn === user.id && !gameData.board[row][col]) {
+    console.log('Move attempt:', {
+      gameData: !!gameData,
+      currentTurn: gameData?.currentTurn,
+      userId: user.id,
+      isMyTurn: gameData?.currentTurn === user.id,
+      cellEmpty: !gameData?.board[row][col],
+      isMoving,
+      canMove: gameData && gameData.currentTurn === user.id && !gameData.board[row][col] && !isMoving
+    });
+    
+    if (gameData && gameData.currentTurn === user.id && !gameData.board[row][col] && !isMoving) {
       console.log('Making move:', row, col);
+      
+      // Set moving state to prevent double-clicks
+      setIsMoving(true);
+      
+      // Determine player symbol based on active player index in room
+      const activePlayers = room?.players?.filter(p => !p.isSpectator) || [];
+      const playerIndex = activePlayers.findIndex(p => p.user.id === user.id);
+      const symbol = playerIndex === 0 ? 'X' : 'O';
       
       // Optimistic UI update - immediately update the board
       const optimisticGameData = {
         ...gameData,
         board: gameData.board.map((r, i) => 
-          i === row ? r.map((c, j) => j === col ? (gameData.board.every((r, ri) => 
-            ri === 0 ? r.every((c, ci) => ci === 0 ? true : c !== '') : r.every((c, ci) => c !== '')
-          ) ? 'X' : 'O') : c) : r
+          i === row ? r.map((c, j) => j === col ? symbol : c) : r
         )
       };
       setGameData(optimisticGameData);
       
       // Send move to server
       makeMove(roomId, { row, col });
-    }
-  };
-
-  const handleQuizAnswer = (answerIndex) => {
-    if (quizState.currentQuestion && quizState.selectedAnswer === null) {
-      setQuizState(prev => ({ ...prev, selectedAnswer: answerIndex }));
-      makeMove(roomId, {
-        questionIndex: quizState.questionIndex,
-        selectedAnswer: answerIndex,
-        timeAnswered: quizState.timeLeft
-      });
+      
+      // Reset moving state after a short delay
+      setTimeout(() => {
+        setIsMoving(false);
+      }, 500);
     }
   };
 
@@ -213,6 +185,14 @@ const Game = () => {
 
     const isMyTurn = gameData.currentTurn === user.id;
     const gameFinished = gameData.winner || gameData.board.every(row => row.every(cell => cell !== ''));
+    
+    // Debug logging for turn validation
+    console.log('Turn Debug:', {
+      currentTurn: gameData.currentTurn,
+      userId: user.id,
+      isMyTurn,
+      gameData: gameData
+    });
 
     return (
       <div className="card">
@@ -250,9 +230,9 @@ const Game = () => {
               <div
                 key={`${rowIndex}-${colIndex}`}
                 className={`game-cell ${cell.toLowerCase()}`}
-                onClick={() => !gameFinished && isMyTurn && !cell && handleTicTacToeMove(rowIndex, colIndex)}
+                onClick={() => !gameFinished && isMyTurn && !cell && !isMoving && handleTicTacToeMove(rowIndex, colIndex)}
                 style={{ 
-                  cursor: (!gameFinished && isMyTurn && !cell) ? 'pointer' : 'default',
+                  cursor: (!gameFinished && isMyTurn && !cell && !isMoving) ? 'pointer' : 'default',
                   border: '2px solid #333',
                   height: '80px',
                   display: 'flex',
@@ -260,7 +240,8 @@ const Game = () => {
                   justifyContent: 'center',
                   fontSize: '32px',
                   fontWeight: 'bold',
-                  backgroundColor: (!gameFinished && isMyTurn && !cell) ? '#f0f0f0' : 'white'
+                  backgroundColor: (!gameFinished && isMyTurn && !cell && !isMoving) ? '#f0f0f0' : 'white',
+                  opacity: isMoving ? 0.7 : 1
                 }}
               >
                 {cell}
@@ -280,50 +261,10 @@ const Game = () => {
     );
   };
 
-  const renderQuiz = () => {
-    if (!quizState.currentQuestion) {
-      return (
-        <div className="card">
-          <h3>Quiz Game</h3>
-          <div className="loading">Waiting for question...</div>
-        </div>
-      );
-    }
-
-    return (
-      <div className="card">
-        <h3>Quiz Game</h3>
-        
-        <div className="quiz-container">
-          <div className="quiz-timer">
-            Time: {quizState.timeLeft}s
-          </div>
-          
-          <div className="quiz-question">
-            {quizState.currentQuestion.question}
-          </div>
-          
-          <div className="quiz-options">
-            {quizState.currentQuestion.options.map((option, index) => (
-              <div
-                key={index}
-                className={`quiz-option ${quizState.selectedAnswer === index ? 'selected' : ''}`}
-                onClick={() => handleQuizAnswer(index)}
-                style={{ cursor: quizState.selectedAnswer === null ? 'pointer' : 'default' }}
-              >
-                {String.fromCharCode(65 + index)}. {option}
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    );
-  };
-
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-        <h2>{room.name} - {room.gameType === 'tic-tac-toe' ? 'Tic Tac Toe' : 'Quiz'}</h2>
+        <h2>{room.name} - Tic Tac Toe</h2>
         <button className="btn btn-secondary" onClick={handleLeaveGame}>
           Leave Game
         </button>
@@ -332,7 +273,7 @@ const Game = () => {
       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '20px' }}>
         {/* Game Area */}
         <div>
-          {room.gameType === 'tic-tac-toe' ? renderTicTacToe() : renderQuiz()}
+          {renderTicTacToe()}
         </div>
 
         {/* Chat */}

@@ -6,6 +6,107 @@ const { generateQuizQuestions } = require('../utils/quizQuestions');
 
 // Store active socket connections
 const connectedUsers = new Map();
+// Store room timers to prevent memory leaks
+const roomTimers = new Map();
+let manualStartTimers = new Map(); // roomId -> timer
+
+// Helper to clear room timers
+function clearRoomTimers(roomId) {
+  const timers = roomTimers.get(roomId) || [];
+  timers.forEach(timer => {
+    try {
+      clearTimeout(timer);
+    } catch (error) {
+      console.error('Error clearing timer:', error);
+    }
+  });
+  roomTimers.delete(roomId);
+}
+
+// Helper to add room timer
+function addRoomTimer(roomId, timer) {
+  if (!roomTimers.has(roomId)) {
+    roomTimers.set(roomId, []);
+  }
+  roomTimers.get(roomId).push(timer);
+}
+
+// Define shared functions before module.exports
+async function startGame(roomId, io) {
+  try {
+    const room = await Room.findById(roomId);
+    if (!room) {
+      console.error(`Room ${roomId} not found when starting game`);
+      return;
+    }
+
+    console.log(`Starting ${room.gameType} game for room ${roomId}`);
+    room.gameState = 'playing';
+    
+    if (room.gameType === 'tic-tac-toe') {
+      // Initialize Tic Tac Toe
+      room.gameData.board = [['', '', ''], ['', '', ''], ['', '', '']];
+      // Set first turn to first active (non-spectator) player
+      const activePlayers = room.players.filter(p => !p.isSpectator);
+      room.gameData.currentTurn = activePlayers[0].user;
+      room.gameData.winner = null;
+    }
+
+    await room.save();
+    console.log(`Game data saved for room ${roomId}`);
+
+    // Ensure game data has string IDs for frontend compatibility
+    const gameDataForFrontend = {
+      ...room.gameData,
+      currentTurn: room.gameData.currentTurn?.toString(),
+      winner: room.gameData.winner?.toString()
+    };
+
+    // Emit game started event to all players
+    io.to(roomId).emit('game-started', {
+      gameType: room.gameType,
+      gameData: gameDataForFrontend
+    });
+
+    // Also emit room update to ensure all clients have latest data
+    const updatedRoom = await Room.findById(roomId)
+      .populate('players.user', 'username')
+      .populate('host', 'username');
+    
+    if (updatedRoom) {
+      const formattedRoom = {
+        id: updatedRoom._id,
+        code: updatedRoom.code,
+        name: updatedRoom.name,
+        gameType: updatedRoom.gameType,
+        host: updatedRoom.host.username,
+        players: updatedRoom.players.map(player => ({
+          user: {
+            id: player.user._id,
+            username: player.user.username
+          },
+          isReady: player.isReady,
+          score: player.score,
+          isSpectator: player.isSpectator || false
+        })),
+        maxPlayers: updatedRoom.maxPlayers,
+        gameState: updatedRoom.gameState,
+        gameData: {
+          ...updatedRoom.gameData,
+          currentTurn: updatedRoom.gameData.currentTurn?.toString(),
+          winner: updatedRoom.gameData.winner?.toString()
+        }
+      };
+      
+      io.to(roomId).emit('room-updated', { room: formattedRoom });
+    }
+
+  } catch (error) {
+    console.error('Start game error:', error);
+    // Emit error to room participants
+    io.to(roomId).emit('error', { message: 'Failed to start game. Please try again.' });
+  }
+}
 
 module.exports = (io) => {
   io.use(async (socket, next) => {
@@ -52,8 +153,8 @@ module.exports = (io) => {
     // Join user's current room if exists
     socket.on('join-current-room', async () => {
       try {
-        const user = await User.findById(socket.userId);
-        if (user.currentRoom) {
+        const user = await User.findById(socket.userId).lean();
+        if (user && user.currentRoom) {
           socket.join(user.currentRoom.toString());
           socket.emit('joined-room', { roomId: user.currentRoom });
         }
@@ -71,6 +172,13 @@ module.exports = (io) => {
 
         if (!room) {
           socket.emit('error', { message: 'Room not found' });
+          return;
+        }
+
+        // Check if user is actually a player in this room
+        const isPlayer = room.players.some(p => p.user._id.toString() === socket.userId.toString());
+        if (!isPlayer) {
+          socket.emit('error', { message: 'You are not a member of this room' });
           return;
         }
 
@@ -94,13 +202,29 @@ module.exports = (io) => {
           })),
           maxPlayers: room.maxPlayers,
           gameState: room.gameState,
-          gameData: room.gameData
+          gameData: {
+            ...room.gameData,
+            currentTurn: room.gameData.currentTurn?.toString(),
+            winner: room.gameData.winner?.toString()
+          }
         };
         
-        // Emit room update to all players
-        io.to(roomId).emit('room-updated', {
+        // Send the current room state to the joining user
+        socket.emit('room-updated', {
           room: formattedRoom
         });
+
+        // Notify all other players in the room that someone joined
+        socket.to(roomId).emit('player-socket-connected', {
+          userId: socket.userId,
+          username: socket.username,
+          room: formattedRoom
+        });
+
+        // No need for additional room-updated emission here - already sent above
+
+        // Check if we should start countdown based on room settings
+        // await checkAndStartCountdown(roomId, io); // Removed automatic countdown
 
         // If game is already in progress, emit game-started event to new player
         if (room.gameState === 'playing') {
@@ -213,43 +337,52 @@ module.exports = (io) => {
         const room = await Room.findById(roomId);
         if (!room) return;
 
-        const player = room.players.find(p => p.user.toString() === socket.userId.toString());
-        if (player) {
-          // Use findOneAndUpdate to avoid version conflicts
-          const updatedRoom = await Room.findOneAndUpdate(
-            { 
-              _id: roomId,
-              'players.user': socket.userId 
-            },
-            { 
-              $set: { 
-                'players.$.isReady': !player.isReady 
-              }
-            },
-            { new: true }
-          );
-
-          if (updatedRoom) {
-            const updatedPlayer = updatedRoom.players.find(p => p.user.toString() === socket.userId.toString());
-            
-            io.to(roomId).emit('player-ready-toggled', {
-              userId: socket.userId,
-              isReady: updatedPlayer.isReady
-            });
-
-            // Check if all players are ready
-            const activePlayers = updatedRoom.players.filter(p => !p.isSpectator);
+        const activePlayers = room.players.filter(p => !p.isSpectator);
             if (activePlayers.length > 0 && activePlayers.every(p => p.isReady)) {
-              // Start countdown instead of immediately starting game
-              startCountdown(roomId);
+          // Start 30-second countdown instead of immediately starting game
+          io.to(roomId).emit('countdown-update', { countdown: 30 });
+          let countdown = 30;
+          const countdownInterval = setInterval(async () => {
+            countdown--;
+            io.to(roomId).emit('countdown-update', { countdown });
+            if (countdown <= 0) {
+              clearInterval(countdownInterval);
+              manualStartTimers.delete(roomId);
+              await startGame(roomId, io);
+            }
+          }, 1000);
+          manualStartTimers.set(roomId, countdownInterval);
             } else {
               // If not all ready, cancel any existing countdown
               io.to(roomId).emit('countdown-cancelled');
-            }
+          if (manualStartTimers.has(roomId)) {
+            clearInterval(manualStartTimers.get(roomId));
+            manualStartTimers.delete(roomId);
           }
         }
       } catch (error) {
         console.error('Toggle ready error:', error);
+      }
+    });
+
+    // Add a new socket event for manual start:
+    socket.on('start-game', async (roomId) => {
+      try {
+        const room = await Room.findById(roomId);
+        if (!room) return;
+        // Only host can start the game
+        if (room.host.toString() !== socket.userId.toString()) return;
+        // Only start if all players are ready
+        const activePlayers = room.players.filter(p => !p.isSpectator);
+        if (activePlayers.length > 0 && activePlayers.every(p => p.isReady)) {
+          if (manualStartTimers.has(roomId)) {
+            clearInterval(manualStartTimers.get(roomId));
+            manualStartTimers.delete(roomId);
+          }
+          await startGame(roomId, io);
+        }
+      } catch (error) {
+        console.error('Manual start-game error:', error);
       }
     });
 
@@ -258,6 +391,19 @@ module.exports = (io) => {
       try {
         const { roomId, content, messageType = 'chat' } = data;
         
+        // Emit message immediately for instant chat response
+        const tempMessageId = new Date().getTime().toString(); // Temporary ID
+        io.to(roomId).emit('new-message', {
+          message: {
+            id: tempMessageId,
+            content: content,
+            sender: socket.username, // Use socket username directly
+            messageType: messageType,
+            timestamp: new Date()
+          }
+        });
+
+        // Save to database asynchronously
         const message = new Message({
           room: roomId,
           sender: socket.userId,
@@ -265,18 +411,21 @@ module.exports = (io) => {
           messageType
         });
 
-        await message.save();
-        await message.populate('sender', 'username');
-
-        io.to(roomId).emit('new-message', {
-          message: {
-            id: message._id,
-            content: message.content,
-            sender: message.sender.username,
-            messageType: message.messageType,
-            timestamp: message.timestamp
-          }
+        message.save().then(savedMessage => {
+          // Send updated message with real ID if needed
+          io.to(roomId).emit('message-saved', {
+            tempId: tempMessageId,
+            realId: savedMessage._id
+          });
+        }).catch(error => {
+          console.error('Error saving message:', error);
+          // Optionally emit error to remove the temporary message
+          io.to(roomId).emit('message-error', {
+            tempId: tempMessageId,
+            error: 'Failed to save message'
+          });
         });
+
       } catch (error) {
         console.error('Send message error:', error);
       }
@@ -286,9 +435,11 @@ module.exports = (io) => {
     socket.on('game-move', async (data) => {
       try {
         const { roomId, move } = data;
-        console.log(`Game move received from ${socket.username}:`, move);
+        // Only log for debugging if needed
+        // console.log(`Game move received from ${socket.username}:`, move);
         
-        const room = await Room.findById(roomId);
+        // Use lean() for faster query without full document features
+        const room = await Room.findById(roomId).lean();
         if (!room) {
           socket.emit('error', { message: 'Room not found' });
           return;
@@ -300,9 +451,7 @@ module.exports = (io) => {
         }
 
         if (room.gameType === 'tic-tac-toe') {
-          await handleTicTacToeMove(room, move, socket);
-        } else if (room.gameType === 'quiz') {
-          await handleQuizMove(room, move, socket);
+          await handleTicTacToeMove(room, move, socket, io, roomId);
         }
       } catch (error) {
         console.error('Game move error:', error);
@@ -383,7 +532,7 @@ module.exports = (io) => {
       }
     });
 
-    // Handle disconnect - preserve room for potential refresh
+    // Handle disconnect - improved handling
     socket.on('disconnect', async () => {
       console.log(`User disconnected: ${socket.username}`);
       
@@ -394,8 +543,23 @@ module.exports = (io) => {
         // Update user offline status
         await User.findByIdAndUpdate(socket.userId, { isOnline: false });
         
-        // Don't clear currentRoom - preserve it for refresh
-        console.log(`User ${socket.username} disconnected - room preserved for potential refresh`);
+        // Find room where user was playing
+        const room = await Room.findOne({ 
+          'players.user': socket.userId, 
+          gameState: { $in: ['playing', 'waiting'] }
+        });
+        
+        if (room) {
+          console.log(`User ${socket.username} disconnected from room ${room._id}`);
+          
+          // Emit player disconnected event
+          socket.to(room._id.toString()).emit('player-disconnected', {
+            userId: socket.userId,
+            username: socket.username
+          });
+        }
+        
+        console.log(`User ${socket.username} disconnect cleanup completed`);
         
       } catch (error) {
         console.error('Disconnect cleanup error:', error);
@@ -403,106 +567,20 @@ module.exports = (io) => {
     });
   });
 
-  // Game logic functions
-  async function startGame(roomId) {
-    try {
-      const room = await Room.findById(roomId);
-      if (!room) return;
+  // Game logic functions are now defined at the top of the file
 
-      room.gameState = 'playing';
-      
-      if (room.gameType === 'tic-tac-toe') {
-        // Initialize Tic Tac Toe
-        room.gameData.board = [['', '', ''], ['', '', ''], ['', '', '']];
-        room.gameData.currentTurn = room.players[0].user;
-        room.gameData.winner = null;
-      } else if (room.gameType === 'quiz') {
-        // Initialize Quiz
-        room.gameData.questions = generateQuizQuestions();
-        room.gameData.currentQuestion = 0;
-        room.gameData.answers = [];
-        
-        // Start first question
-        setTimeout(() => {
-          startQuizQuestion(roomId);
-        }, 3000);
-      }
-
-      await room.save();
-
-      // Emit game started event to all players
-      io.to(roomId).emit('game-started', {
-        gameType: room.gameType,
-        gameData: room.gameData
-      });
-
-      // Also emit room update to ensure all clients have latest data
-      const updatedRoom = await Room.findById(roomId)
-        .populate('players.user', 'username')
-        .populate('host', 'username');
-      
-      if (updatedRoom) {
-        const formattedRoom = {
-          id: updatedRoom._id,
-          code: updatedRoom.code,
-          name: updatedRoom.name,
-          gameType: updatedRoom.gameType,
-          host: updatedRoom.host.username,
-          players: updatedRoom.players.map(player => ({
-            user: {
-              id: player.user._id,
-              username: player.user.username
-            },
-            isReady: player.isReady,
-            score: player.score,
-            isSpectator: player.isSpectator || false
-          })),
-          maxPlayers: updatedRoom.maxPlayers,
-          gameState: updatedRoom.gameState,
-          gameData: updatedRoom.gameData
-        };
-        
-        io.to(roomId).emit('room-updated', { room: formattedRoom });
-      }
-
-    } catch (error) {
-      console.error('Start game error:', error);
-    }
-  }
-
-  // Add countdown timer function
-  async function startCountdown(roomId) {
-    try {
-      const room = await Room.findById(roomId);
-      if (!room) return;
-
-      let countdown = 5; // 5 second countdown
-      
-      const countdownInterval = setInterval(async () => {
-        // Emit countdown update
-        io.to(roomId).emit('countdown-update', { countdown });
-        
-        countdown--;
-        
-        if (countdown <= 0) {
-          clearInterval(countdownInterval);
-          startGame(roomId);
-        }
-      }, 1000);
-      
-    } catch (error) {
-      console.error('Countdown error:', error);
-    }
-  }
-
-  async function handleTicTacToeMove(room, move, socket) {
+  async function handleTicTacToeMove(room, move, socket, io, roomId) {
     const { row, col } = move;
     
-    console.log(`Processing TicTacToe move: row=${row}, col=${col} by ${socket.username}`);
+    // Get the latest room data to avoid race conditions
+    const latestRoom = await Room.findById(roomId);
+    if (!latestRoom || latestRoom.gameState !== 'playing') {
+      socket.emit('error', { message: 'Game is not in progress' });
+      return;
+    }
     
     // Validate move
-    if (room.gameData.currentTurn.toString() !== socket.userId.toString()) {
-      console.log(`Not ${socket.username}'s turn. Current turn: ${room.gameData.currentTurn}`);
+    if (latestRoom.gameData.currentTurn.toString() !== socket.userId.toString()) {
       socket.emit('error', { message: 'Not your turn' });
       return;
     }
@@ -512,195 +590,89 @@ module.exports = (io) => {
       return;
     }
 
-    if (room.gameData.board[row][col] !== '') {
-      console.log(`Cell ${row},${col} is already occupied: ${room.gameData.board[row][col]}`);
+    if (latestRoom.gameData.board[row][col] !== '') {
       socket.emit('error', { message: 'Invalid move - cell already occupied' });
       return;
     }
 
-    // Make move
-    const playerIndex = room.players.findIndex(p => p.user.toString() === socket.userId.toString());
+    // Get only active (non-spectator) players for turn management
+    const activePlayers = latestRoom.players.filter(p => !p.isSpectator);
+    const playerIndex = activePlayers.findIndex(p => p.user.toString() === socket.userId.toString());
+    
+    if (playerIndex === -1) {
+      socket.emit('error', { message: 'Player not found in active players' });
+      return;
+    }
+    
     const symbol = playerIndex === 0 ? 'X' : 'O';
-    room.gameData.board[row][col] = symbol;
-
-    console.log(`Move made by ${socket.username} (${symbol}) at ${row},${col}`);
-
+    
+    // Create updated game data for immediate response
+    const updatedGameData = {
+      ...latestRoom.gameData,
+      board: latestRoom.gameData.board.map((boardRow, r) => 
+        boardRow.map((cell, c) => (r === row && c === col) ? symbol : cell)
+      )
+    };
+    
     // Check for win
-    const winner = checkTicTacToeWinner(room.gameData.board);
+    const winner = checkTicTacToeWinner(updatedGameData.board);
+    let updatedGameState = latestRoom.gameState;
+    
     if (winner) {
-      room.gameData.winner = socket.userId;
-      room.gameState = 'finished';
-      
-      // Update stats
-      const winnerPlayer = room.players.find(p => p.user.toString() === socket.userId.toString());
-      if (winnerPlayer) {
-        winnerPlayer.score += 10;
-      }
-      console.log(`Game won by ${socket.username} (${symbol})`);
-    } else if (isBoardFull(room.gameData.board)) {
-      room.gameState = 'finished';
+      updatedGameData.winner = socket.userId;
+      updatedGameState = 'finished';
+      console.log(`Game won by ${socket.username}`);
+    } else if (isBoardFull(updatedGameData.board)) {
+      updatedGameState = 'finished';
       console.log('Game ended in draw');
     } else {
-      // Switch turns
-      const currentPlayerIndex = room.players.findIndex(p => p.user.toString() === room.gameData.currentTurn.toString());
-      const nextPlayerIndex = (currentPlayerIndex + 1) % room.players.length;
-      room.gameData.currentTurn = room.players[nextPlayerIndex].user;
-      console.log(`Turn switched to player ${nextPlayerIndex}`);
+      // Switch turns - only consider active players
+      const currentPlayerIndex = activePlayers.findIndex(p => p.user.toString() === latestRoom.gameData.currentTurn.toString());
+      const nextPlayerIndex = (currentPlayerIndex + 1) % activePlayers.length;
+      updatedGameData.currentTurn = activePlayers[nextPlayerIndex].user;
+      
+      console.log(`Turn switched from player ${currentPlayerIndex} to player ${nextPlayerIndex}`);
     }
 
-    await room.save();
-    console.log('Room saved after move');
-
-    // Emit game update to all players immediately
-    io.to(room._id.toString()).emit('game-updated', {
-      gameData: room.gameData,
-      gameState: room.gameState
+    // Debug logging for turn validation
+    console.log('Backend Turn Debug:', {
+      currentTurn: updatedGameData.currentTurn,
+      currentTurnString: updatedGameData.currentTurn?.toString(),
+      currentUserId: socket.userId,
+      currentUserIdString: socket.userId?.toString()
     });
 
-    // Also emit room update to ensure all clients have latest data
-    const updatedRoom = await Room.findById(room._id)
-      .populate('players.user', 'username')
-      .populate('host', 'username');
-    
-    if (updatedRoom) {
-      const formattedRoom = {
-        id: updatedRoom._id,
-        code: updatedRoom.code,
-        name: updatedRoom.name,
-        gameType: updatedRoom.gameType,
-        host: updatedRoom.host.username,
-        players: updatedRoom.players.map(player => ({
-          user: {
-            id: player.user._id,
-            username: player.user.username
-          },
-          isReady: player.isReady,
-          score: player.score,
-          isSpectator: player.isSpectator || false
-        })),
-        maxPlayers: updatedRoom.maxPlayers,
-        gameState: updatedRoom.gameState,
-        gameData: updatedRoom.gameData
-      };
-      
-      io.to(room._id.toString()).emit('room-updated', { room: formattedRoom });
-    }
+    // Ensure currentTurn is sent as string for frontend compatibility
+    const gameDataForFrontend = {
+      ...updatedGameData,
+      currentTurn: updatedGameData.currentTurn?.toString(),
+      winner: updatedGameData.winner?.toString()
+    };
 
-    console.log('Game update events emitted');
-  }
-
-  async function handleQuizAnswer(room, answer, socket) {
-    const { questionIndex, selectedAnswer, timeAnswered } = answer;
-    
-    // Check if answer already submitted
-    const existingAnswer = room.gameData.answers.find(
-      a => a.player.toString() === socket.userId.toString() && a.questionIndex === questionIndex
-    );
-    
-    if (existingAnswer) return;
-
-    // Add answer
-    room.gameData.answers.push({
-      player: socket.userId,
-      questionIndex,
-      answer: selectedAnswer,
-      timeAnswered
+    // Emit game update immediately for instant feedback
+    io.to(roomId).emit('game-updated', {
+      gameData: gameDataForFrontend,
+      gameState: updatedGameState
     });
 
-    await room.save();
-
-    // Check if all players answered or time is up
-    const activePlayers = room.players.filter(p => !p.isSpectator);
-    const answersForQuestion = room.gameData.answers.filter(a => a.questionIndex === questionIndex);
+    // Update database asynchronously using atomic operations
+    // Get the actual player index in the full players array for scoring
+    const fullPlayerIndex = latestRoom.players.findIndex(p => p.user.toString() === socket.userId.toString());
     
-    if (answersForQuestion.length === activePlayers.length) {
-      setTimeout(() => {
-        processQuizQuestion(room._id.toString(), questionIndex);
-      }, 1000);
+    const updateOperations = {
+      [`gameData.board.${row}.${col}`]: symbol,
+      'gameData.currentTurn': updatedGameData.currentTurn,
+      'gameState': updatedGameState
+    };
+
+    if (winner) {
+      updateOperations['gameData.winner'] = socket.userId;
+      updateOperations[`players.${fullPlayerIndex}.score`] = latestRoom.players[fullPlayerIndex].score + 10;
     }
-  }
 
-  async function startQuizQuestion(roomId) {
-    try {
-      const room = await Room.findById(roomId);
-      if (!room || room.gameState !== 'playing') return;
-
-      const currentQuestion = room.gameData.questions[room.gameData.currentQuestion];
-      
-      io.to(roomId).emit('quiz-question', {
-        question: currentQuestion,
-        questionIndex: room.gameData.currentQuestion,
-        timeLimit: 20
-      });
-
-      // Set timer
-      setTimeout(() => {
-        processQuizQuestion(roomId, room.gameData.currentQuestion);
-      }, 20000);
-
-    } catch (error) {
-      console.error('Start quiz question error:', error);
-    }
-  }
-
-  async function processQuizQuestion(roomId, questionIndex) {
-    try {
-      const room = await Room.findById(roomId);
-      if (!room) return;
-
-      const question = room.gameData.questions[questionIndex];
-      const answers = room.gameData.answers.filter(a => a.questionIndex === questionIndex);
-
-      // Calculate scores
-      answers.forEach(answer => {
-        const player = room.players.find(p => p.user.toString() === answer.player.toString());
-        if (player) {
-          if (answer.answer === question.correctAnswer) {
-            let points = 10;
-            // Bonus for quick answer
-            if (answer.timeAnswered < 5) {
-              points += 5;
-            }
-            player.score += points;
-          }
-        }
-      });
-
-      // Emit results
-      io.to(roomId).emit('quiz-results', {
-        questionIndex,
-        correctAnswer: question.correctAnswer,
-        answers,
-        scores: room.players.map(p => ({
-          userId: p.user,
-          score: p.score
-        }))
-      });
-
-      // Move to next question or end game
-      room.gameData.currentQuestion++;
-      if (room.gameData.currentQuestion >= room.gameData.questions.length) {
-        room.gameState = 'finished';
-        await room.save();
-        
-        io.to(roomId).emit('game-ended', {
-          finalScores: room.players.map(p => ({
-            userId: p.user,
-            score: p.score
-          }))
-        });
-      } else {
-        await room.save();
-        
-        // Start next question after 3 seconds
-        setTimeout(() => {
-          startQuizQuestion(roomId);
-        }, 3000);
-      }
-
-    } catch (error) {
-      console.error('Process quiz question error:', error);
-    }
+    Room.findByIdAndUpdate(roomId, { $set: updateOperations }).catch(error => {
+      console.error('Error updating room after move:', error);
+    });
   }
 
   function checkTicTacToeWinner(board) {
@@ -727,4 +699,9 @@ module.exports = (io) => {
   function isBoardFull(board) {
     return board.every(row => row.every(cell => cell !== ''));
   }
-}; 
+
+  // Functions are defined at the top and available via closure
+};
+
+// Export the checkAndStartCountdown function for use in routes
+// module.exports.checkAndStartCountdown = checkAndStartCountdown; 

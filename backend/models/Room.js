@@ -15,7 +15,7 @@ const roomSchema = new mongoose.Schema({
   },
   gameType: {
     type: String,
-    enum: ['tic-tac-toe', 'quiz'],
+    enum: ['tic-tac-toe'],
     required: true
   },
   isPublic: {
@@ -68,31 +68,7 @@ const roomSchema = new mongoose.Schema({
     winner: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User'
-    },
-    
-    // For Quiz
-    currentQuestion: {
-      type: Number,
-      default: 0
-    },
-    questions: [{
-      question: String,
-      options: [String],
-      correctAnswer: Number,
-      timeLimit: Number
-    }],
-    questionTimer: {
-      type: Number,
-      default: 0
-    },
-    answers: [{
-      player: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User'
-      },
-      answer: Number,
-      timeAnswered: Number
-    }]
+    }
   },
   readyTimer: {
     type: Number,
@@ -112,11 +88,7 @@ const roomSchema = new mongoose.Schema({
 
 // Update maxPlayers based on game type
 roomSchema.pre('save', function(next) {
-  if (this.gameType === 'tic-tac-toe') {
-    this.maxPlayers = 2;
-  } else if (this.gameType === 'quiz') {
-    this.maxPlayers = 4;
-  }
+  this.maxPlayers = 2;
   next();
 });
 
