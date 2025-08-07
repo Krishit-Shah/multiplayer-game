@@ -337,9 +337,30 @@ module.exports = (io) => {
         const room = await Room.findById(roomId);
         if (!room) return;
 
+        // Find the player and toggle their ready status
+        const playerIndex = room.players.findIndex(p => p.user.toString() === socket.userId.toString());
+        if (playerIndex === -1) return;
+
+        room.players[playerIndex].isReady = !room.players[playerIndex].isReady;
+        await room.save();
+
+        // Emit the ready status change
+        io.to(roomId).emit('player-ready-toggled', {
+          userId: socket.userId,
+          isReady: room.players[playerIndex].isReady
+        });
+
+        // Check if we should start countdown
         const activePlayers = room.players.filter(p => !p.isSpectator);
-            if (activePlayers.length > 0 && activePlayers.every(p => p.isReady)) {
-          // Start 30-second countdown instead of immediately starting game
+        if (activePlayers.length >= 2 && activePlayers.every(p => p.isReady)) {
+          // Cancel any existing countdown first
+          if (manualStartTimers.has(roomId)) {
+            clearInterval(manualStartTimers.get(roomId));
+            manualStartTimers.delete(roomId);
+          }
+          
+          // Start 30-second countdown
+          console.log(`Starting 30-second countdown for room ${roomId}`);
           io.to(roomId).emit('countdown-update', { countdown: 30 });
           let countdown = 30;
           const countdownInterval = setInterval(async () => {
@@ -352,9 +373,10 @@ module.exports = (io) => {
             }
           }, 1000);
           manualStartTimers.set(roomId, countdownInterval);
-            } else {
-              // If not all ready, cancel any existing countdown
-              io.to(roomId).emit('countdown-cancelled');
+        } else {
+          // If not all ready, cancel any existing countdown
+          console.log(`Cancelling countdown for room ${roomId} - not all players ready`);
+          io.to(roomId).emit('countdown-cancelled');
           if (manualStartTimers.has(roomId)) {
             clearInterval(manualStartTimers.get(roomId));
             manualStartTimers.delete(roomId);

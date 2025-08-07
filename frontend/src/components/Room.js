@@ -517,16 +517,34 @@ const Room = () => {
   return (
     <div>
       {showCountdown && countdown !== null && (
-        <div className="card" style={{ backgroundColor: '#f8f9fa', border: '2px solid #007bff', marginBottom: '20px', textAlign: 'center', padding: '20px' }}>
-          <h3 style={{ color: '#007bff', margin: '0' }}>
-            Game starts in {countdown} second{countdown !== 1 ? 's' : ''}...
+        <div className="card" style={{ 
+          backgroundColor: '#e8f4fd', 
+          border: '2px solid #007bff', 
+          marginBottom: '20px', 
+          textAlign: 'center', 
+          padding: '20px',
+          borderRadius: '8px',
+          boxShadow: '0 4px 8px rgba(0,123,255,0.1)'
+        }}>
+          <h3 style={{ color: '#007bff', margin: '0', fontSize: '1.5rem' }}>
+            🎮 Game starts in {countdown} second{countdown !== 1 ? 's' : ''}...
           </h3>
-          <p style={{ margin: '10px 0 0 0', color: '#666' }}>
+          <p style={{ margin: '10px 0 0 0', color: '#666', fontSize: '1rem' }}>
             Get ready! The game will begin automatically.
           </p>
-          {canStart && (
-            <button className="btn btn-success" onClick={handleManualStart} style={{ marginTop: '10px' }}>
-              Start Game Now
+          {isHost && (
+            <button 
+              className="btn btn-success" 
+              onClick={handleManualStart} 
+              style={{ 
+                marginTop: '15px',
+                padding: '10px 20px',
+                fontSize: '1rem',
+                fontWeight: 'bold',
+                borderRadius: '5px'
+              }}
+            >
+              ⚡ Start Game Now
             </button>
           )}
         </div>
@@ -575,10 +593,21 @@ const Room = () => {
                     : player.user?.id || player.user?._id || index;
                   
                   return (
-                    <div key={playerId} className="player-tag">
-                      {playerName}
-                      {player.isReady && <span className="ready-indicator"> ✓</span>}
-                      {!player.isReady && <span className="not-ready-indicator"> ⏳</span>}
+                    <div key={playerId} className="player-tag" style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '8px 12px',
+                      margin: '5px 0',
+                      backgroundColor: player.isReady ? '#d4edda' : '#f8d7da',
+                      border: `1px solid ${player.isReady ? '#c3e6cb' : '#f5c6cb'}`,
+                      borderRadius: '5px',
+                      color: player.isReady ? '#155724' : '#721c24'
+                    }}>
+                      <span style={{ fontWeight: 'bold' }}>{playerName}</span>
+                      <span style={{ fontSize: '1.1rem' }}>
+                        {player.isReady ? '✅' : '⏳'}
+                      </span>
                     </div>
                   );
                 })}
@@ -589,9 +618,28 @@ const Room = () => {
               <button 
                 className={`btn ${isReady ? 'btn-success' : 'btn-secondary'}`}
                 onClick={handleToggleReady}
+                style={{ 
+                  padding: '10px 20px',
+                  fontSize: '1rem',
+                  fontWeight: 'bold',
+                  borderRadius: '5px'
+                }}
               >
-                {isReady ? 'Ready ✓' : 'Not Ready'}
+                {isReady ? '✅ Ready' : '⏳ Not Ready'}
               </button>
+              
+              {allReady && room.players.length >= 2 && !showCountdown && (
+                <div style={{ 
+                  marginTop: '10px', 
+                  padding: '10px', 
+                  backgroundColor: '#d4edda', 
+                  border: '1px solid #c3e6cb',
+                  borderRadius: '5px',
+                  color: '#155724'
+                }}>
+                  🎉 All players ready! Countdown will start automatically.
+                </div>
+              )}
             </div>
           </div>
 
