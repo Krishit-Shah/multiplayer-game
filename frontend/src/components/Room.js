@@ -319,7 +319,6 @@ const Room = () => {
   const [room, setRoom] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [isReady, setIsReady] = useState(false);
   const [hasJoined, setHasJoined] = useState(false);
   const [socketReady, setSocketReady] = useState(false);
   const [countdown, setCountdown] = useState(null);
@@ -455,8 +454,7 @@ const Room = () => {
 
   const handleToggleReady = useCallback(() => {
     toggleReady(roomId);
-    setIsReady(!isReady);
-  }, [roomId, toggleReady, isReady]);
+  }, [roomId, toggleReady]);
 
   const handleStartGame = useCallback(() => {
     navigate(`/game/${roomId}`);
@@ -513,6 +511,13 @@ const Room = () => {
   const isHost = hostName === user.username;
   const allReady = room.players.every(p => p.isReady);
   const canStart = isHost && allReady && room.players.length >= 2;
+  
+  // Get current user's ready status from room data
+  const currentPlayer = room.players.find(p => {
+    const playerName = typeof p.user === 'string' ? p.user : p.user?.username;
+    return playerName === user.username;
+  });
+  const isReady = currentPlayer?.isReady || false;
 
   return (
     <div>
